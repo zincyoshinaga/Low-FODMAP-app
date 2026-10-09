@@ -1,0 +1,10 @@
+import {getChatGPTUser} from '@/app/chatgpt-auth';
+import {rawDb} from '@/db/raw';
+import {json,mutationGuard} from '@/lib/api-validation';
+import {canonicalFoodName} from '@/lib/food-picker';
+import {z} from 'zod';
+export const dynamic='force-dynamic';
+const names=z.array(z.string().trim().min(1).max(60).refine(s=>!/[、,，\n\r]/.test(s))).max(200).transform(list=>[...new Set(list.map(canonicalFoodName))]);
+const inputSchema=z.object({excluded:names.optional(),favorites:names.optional(),recent:names.optional()}).strict().refine(v=>Object.keys(v).length>0);
+export async function GET(){const user=await getChatGPTUser();if(!user)return json({error:'設定を保存するにはサインインしてください。'},401);try{const record=await rawDb().prepare('SELECT excluded,favorites,recent FROM preferences WHERE user_id=?').bind(user.userId).first<{excluded:string;favorites:string;recent:string}>();return json(record?{excluded:JSON.parse(record.excluded),favorites:JSON.parse(record.favorites),recent:JSON.parse(record.recent)}:{excluded:['玉ねぎ','にんにく'],favorites:[],recent:[]})}catch{return json({error:'設定を読み込めませんでした。'},503)}}
+export async function PATCH(request:Request){const invalid=mutationGuard(request);if(invalid)return invalid;const user=await getChatGPTUser();if(!user)return json({error:'設定を保存するにはサインインしてください。'},401);let parsed;try{parsed=inputSchema.safeParse(await request.json())}catch{return json({error:'食材名を確認してください。'},400)}if(!parsed.success)return json({error:'食材名を確認してください。'},400);try{const db=rawDb();await db.prepare('INSERT INTO preferences (user_id,updated_at) VALUES (?,?) ON CONFLICT(user_id) DO NOTHING').bind(user.userId,new Date().toISOString()).run();const fields=Object.entries(parsed.data);const assignments=fields.map(([key])=>key+'=?').join(',');await db.prepare('UPDATE preferences SET '+assignments+',updated_at=? WHERE user_id=?').bind(...fields.map(([key,value])=>JSON.stringify(key==='recent'?value?.slice(0,12):value)),new Date().toISOString(),user.userId).run();return json({saved:true})}catch{return json({error:'設定を保存できませんでした。'},503)}}
